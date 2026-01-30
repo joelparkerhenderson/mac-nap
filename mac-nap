@@ -1,0 +1,163 @@
+#!/bin/sh
+
+##
+# mac-nap
+#
+# This is a simple command line script to use the Apple macOS
+# power management settings command `pmset` to go to sleep now,
+# then wake at a given datetime, and optionally run a command.
+#
+# Syntax:
+#
+#     mac-nap <yyyy-mm-dd> <hh:mm:ss> [command]
+# 
+# Example to sleep until 2030 new year's day at eight in the morning:
+#
+#     mac-nap 2026-01-01 08:00:00
+#
+# Example to sleep until tonight 11 p.m., then wake, then run Claude AI on your existing tasks file:
+#
+# ```sh
+# mac-nap +%Y-%m-%d 23:00:00 "claude $HOME/tasks.md"
+# ```
+# 
+# ## Command
+# 
+# If you specify a command, then mac-nap will schedule it for one minute
+# after the wake time, because this helps the machine have time to spin up.
+# 
+# Because of this timing increment, please choose a minute from 00 to 58, not 59.
+#
+# ## pmset options
+#
+# The command `pmset` has many options; here are the most-relevant.
+#
+#     pmset schedule {sleep | wake | poweron | shutdown | wakeorpoweron} "MM/dd/yy HH:mm:ss" [owner]
+#     pmset schedule [cancel] [cancelall]
+#
+#     pmset repeat {sleep | wake | poweron | shutdown | wakeorpoweron} weekdays "HH:mm:ss"
+#     pmset repeat cancel
+#
+# Examples:
+#
+# - `pmset -g sched`: See the current schedule.
+#
+# - `sudo pmset repeat wake M 8:00:00`: Schedule wake at 8:00 am every Monday.
+#
+# - `sudo pmset repeat cancel`: Cancel the current schedule.
+#
+# You may want to know about similar pmset options:
+#
+# - `wake`: wake up a Mac that is sleeping e.g. by inactivity or sleep command.
+#
+# - `poweron`: turn on a Mac that is powered off e.g. by shut down command.
+#
+# - `wakeorpoweron`: both wake and poweron.
+#
+# Weekdays:
+#
+# - `MTWRFSU`: Monday Tuesday Wednesday Thursday Friday Saturday Sunday
+#
+# ## at command
+# 
+# <https://en.wikipedia.org/wiki/At_(command)>
+# 
+# On Unix-like operating systems, at reads a series of commands from standard
+# input and collects them into one "at-job" which is carried out at a later
+# date. The job inherits the current environment, so that it is executed in the
+# same working directory and with the same environment variables set as when it
+# was scheduled. 
+##
+
+set -euf
+
+##
+# Load unix-shell-script-kit helpers for exit codes, printing, time, etc.
+# Source: https://github.com/sixarm/unix-shell-script-kit
+##
+
+EXIT_SUCCESS=0
+EXIT_FAILURE=1
+EXIT_USAGE=2
+
+out() {  printf %s%s%s\\n "${STDOUT_COLOR_START:-}" "$*" "${STDOUT_COLOR_STOP:-}"; }
+err() {  >&2 printf %s%s%s\\n "${STDERR_COLOR_START:-}" "$*" "${STDERR_COLOR_STOP:-}"; }
+die() {  n="$1" ; shift ; err "$*"; exit "$n"; }
+
+time_hh_mm_ss_next_wrap() {
+    h=$(expr ${1:0:2})
+    m=$(expr ${1:3:2})
+    s=$(expr ${1:6:2} + 1)
+    if [ $s -ge 60 ]; then s=0; m=$(expr $m + 1); fi
+    if [ $m -ge 60 ]; then m=0; h=$(expr $h + 1); fi
+    if [ $h -ge 24 ]; then h=0; fi
+    printf "%02d:%02d:%02d\n" $h $m $s
+}
+
+##
+# Verify parameters
+##
+
+if [ $# -lt 2 ] || [ $# -gt 3 ]; then
+    die $EXIT_USAGE "mac-nap <yyyy-mm-dd> <hh:mm:ss> [command]"
+fi
+
+date="$1"; shift
+time="$1"; shift
+
+if [ "${time:0:5}" = "23:59" ]; then
+    die $EXIT_FAILURE "mac-nap isn't smart enough yet to increment time 23:59; please change to time 23:58 or any other time."
+fi
+
+if [ $# -gt 0 ]; then
+    command="$1"; shift
+fi
+
+##
+#  Date & time helpers
+##
+
+# Convert from date format "yyyy-mm-dd" into `pmset` command format "mm/dd/yy".
+date_as_pmset_format() {
+    printf %s\\n "${date:5:2}/${date:8:2}/${date:2:2}"
+}
+
+# Convert from date format "yyyy-mm-dd" into `at` command format "yyyymmddd"
+date_as_at_format() {
+    printf %s\\n "${1:0:4}${1:5:2}${1:8:2}"
+}
+
+# Convert from time format "hh:mm:ss" into `at` command format "hhmm.ss"
+time_as_at_format() {
+    printf %s\\n "${1:0:2}${1:3:2}.${1:6:2}"
+}
+
+##
+#  Main
+##
+
+do_command() {
+    if [ -n "${command}" ]; then
+        _date="$(date_as_at_format $date)"
+        _time="$(time_as_at_format $(time_hh_mm_ss_next_wrap "$time"))"
+        printf %s\\n "$command" | at -t "$_date$_time"
+    fi
+}
+
+do_wake() {
+    _date="$(date_as_pmset_format $date)"
+    sudo pmset schedule wake "$_date $time"
+}
+
+do_sleep() {
+    sudo pmset sleepnow
+}
+
+main() {
+    do_command
+    do_wake
+    do_sleep
+}
+
+main
+exit $EXIT_SUCCESS
