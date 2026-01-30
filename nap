@@ -1,0 +1,357 @@
+#!/bin/sh
+
+##
+# nap
+#
+# This command line script sets the system to go to sleep now,
+# then wake at a given datetime, then optionally run a command.
+#
+# Currently works on macOS. Pull requests welcome for other systems.
+# 
+# Syntax:
+#
+# ```sh
+# nap <duration | datetime | description> [command]
+# ```
+# 
+# ## Examples
+# 
+# Nap for one hour, then echo hello:
+#
+# ```sh
+# nap 1hour echo hello
+# ```
+#
+# Nap until noon, then ring the system bell:
+#
+# ```sh
+# nap 12:00 tput bel
+# ```
+#
+# Nap until tomorrow same time, then open a web page:
+#
+# ```sh
+# nap tomorrow open https://example.com
+# ```
+# 
+# # Nap until the weekend, then send mail:
+#
+# ```sh
+# nap "next saturday 12:00" "echo \"it's lunch time\" | mail -s lunch alice@example.com"
+# ```
+# 
+# Nap until the new year, then celebrate:
+#
+# ```sh
+# nap 2027-01-01T00:00:00 say happy new year
+# ```
+# 
+# ## Date descriptions
+# 
+# If your system has a command `gdate` or command `date` that 
+# supports the option `--date=` with a date description string,
+# then you can create a date or time such as:
+# 
+# ```sh
+# nap today "3 hours"
+# nap tomorrow 12:00
+# nap "2 days" 12:00
+# nap "next saturday" 12:00
+# ```
+# 
+# If you want to install GNU coreutils which has the GNU command `gdate`,
+# and you use brew, then you can run:
+# 
+# ```sh
+# brew install coreutils
+# ```
+# 
+# ## Command
+# 
+# If you specify a command, then nap will schedule it for one minute
+# after the wake time, because this helps the machine have time to spin up.
+# 
+# Because of this timing increment, please choose a minute from 00 to 58, not 59.
+#
+# ## pmset options
+#
+# The command `pmset` has many options; here are the most-relevant.
+#
+# ```sh
+# pmset schedule {sleep | wake | poweron | shutdown | wakeorpoweron} "MM/dd/yy HH:mm:ss" [owner]
+# pmset schedule [cancel] [cancelall]
+# ```
+# 
+# ```sh
+# pmset repeat {sleep | wake | poweron | shutdown | wakeorpoweron} weekdays "HH:mm:ss"
+# pmset repeat cancel
+# ```
+#
+# Examples:
+#
+# - `pmset -g sched`: See the current schedule.
+#
+# - `sudo pmset repeat wake M 8:00:00`: Schedule wake at 8:00 am every Monday.
+#
+# - `sudo pmset repeat cancel`: Cancel the current schedule.
+#
+# You may want to know about similar pmset options:
+#
+# - `wake`: wake up a Mac that is sleeping e.g. by inactivity or sleep command.
+#
+# - `poweron`: turn on a Mac that is powered off e.g. by shut down command.
+#
+# - `wakeorpoweron`: both wake and poweron.
+#
+# Weekdays:
+#
+# - `MTWRFSU`: Monday Tuesday Wednesday Thursday Friday Saturday Sunday
+#
+# ## at command
+# 
+# <https://en.wikipedia.org/wiki/At_(command)>
+# 
+# On Unix-like operating systems, at reads a series of commands from standard
+# input and collects them into one "at-job" which is carried out at a later
+# date. The job inherits the current environment, so that it is executed in the
+# same working directory and with the same environment variables set as when it
+# was scheduled. 
+# 
+# If you prefer other ways to schedule, you may want to read about more options
+# for the `at` command, or about other commands such as `cron`, `anacron`, etc.
+##
+
+set -euf
+
+##
+# Load unix-shell-script-kit helpers for exit codes, printing, time, etc.
+# Source: https://github.com/sixarm/unix-shell-script-kit
+##
+
+EXIT_SUCCESS=0
+EXIT_FAILURE=1
+EXIT_USAGE=2
+
+out() {  printf %s%s%s\\n "${STDOUT_COLOR_START:-}" "$*" "${STDOUT_COLOR_STOP:-}"; }
+err() {  >&2 printf %s%s%s\\n "${STDERR_COLOR_START:-}" "$*" "${STDERR_COLOR_STOP:-}"; }
+die() {  n="$1" ; shift ; err "$*"; exit "$n"; }
+
+# command_exists: does a command exist?
+#
+# Syntax:
+# 
+# ```sh
+# TODO
+# => 
+# ```
+#
+# Example:
+#
+# ```sh
+# command_exists grep
+# => true
+#
+# command_exists curl
+# => false
+# ```
+# 
+command_exists() {
+        command -v "$1" >/dev/null 2>&1
+}
+
+# leap_year: is the year a leap year?
+#
+# Syntax:
+# 
+# ```sh
+# leap_year <year>
+# => true or false
+# ```
+#
+# Examples:
+# 
+# ```sh
+# leap_year 2023 => false
+# leap_year 2024 => true
+# leap_year 2025 => false
+# ```
+# 
+leap_year() { 
+   (( !($1 % 4) && ($1 % 100 || !($1 % 400) ) ))
+}
+
+# datetime_mday_max: given a year and month, calculate the maximum month-day number.
+#
+# Syntax:
+# 
+# ```sh
+# datetime_mday_max <yyyy-mm*>
+# => true or false
+# ```
+#
+# Examples:
+# 
+# ```sh
+# datetime_mday_max 2026-01 => 31
+# datetime_mday_max 2026-02 => 28
+# ```
+# 
+datetime_mday_max() {
+    datetime="$1"
+    year=$(( ${datetime:0:4} ))
+    month=$(( ${datetime:5:2} ))
+    case $month in
+        1|3|5|7|8|10|12) printf 31 ;;
+        4|6|9|11) printf 30 ;;
+        2) leap_year $year && printf 29 || printf 28 ;;
+        *) die $EXIT_USAGE "datetime_mday_max $datetime" ;;
+    esac
+}        
+
+# datetime_format_for_at_command: datetime format for `at` command.
+# 
+# Given a datetime as ISO 8601 format "yyyy-mm-ddThh:mm:ss" 
+# return the format for `at` command "yyyymmdddhhmm.ss".
+# 
+# Syntax:
+# 
+# ```sh
+# datetime_format_for_at_command <datetime>
+# => <yyyymmdddhhmm.ss>
+# ```
+#
+# Example:
+# 
+# ```sh
+# datetime_format_for_at_command 2026-12-31T01:02:03
+# => 202612310102.03
+# ```
+#
+datetime_format_for_at_command() {
+    datetime="$1"
+    printf "${datetime:0:4}${datetime:5:2}${datetime:8:2}${datetime:11:2}${datetime:14:2}.${datetime:17:2}"
+}
+
+# datetime_format_for_pmset_command: datetime format for `pmset` command.
+# 
+# Given a datetime as ISO 8601 format "yyyy-mm-ddThh:mm:ss" 
+# return the format for `pmset` command  "mm/dd/yy hh:mm:ss".
+#
+# Syntax:
+# 
+# ```sh
+# datetime_format_for_pmset_command <datetime>
+# => <mm/dd/yy hh:mm:ss>
+# ```
+#
+# Example:
+# ```sh
+# datetime_format_for_pmset_command 2026-12-31T01:02:03
+# => 12/31/26 01:02:03
+# ```
+# 
+datetime_format_for_pmset_command() {
+    datetime="$1"
+    printf "${datetime:5:2}/${datetime:8:2}/${datetime:2:2} ${datetime:11:8}"
+}
+
+# datetime_add: given a datetime, add years, months, days, hours, minutes, seconds.
+#
+# Syntax:
+# 
+# ```sh
+# datetime_add <datetime> <years> <months> <days> <hours> <minutes> <seconds>
+# => <datetime>
+# ```
+# 
+# Examples:
+# 
+# ```sh
+# datetime_add 2000-01-01T00:00:00 0 0 0 0 0 1 => 2000-01-01T00:00:01 (next second)
+# datetime_add 2000-01-01T00:00:00 0 0 0 0 1 0 => 2000-01-01T00:01:00 (next minute)
+# datetime_add 2000-01-01T00:00:00 0 0 0 1 0 0 => 2000-01-01T01:00:00 (next hour)
+# datetime_add 2000-01-01T00:00:00 0 0 1 0 0 0 => 2000-01-02T00:00:00 (next day)
+# datetime_add 2000-01-01T00:00:00 0 1 0 0 0 0 => 2000-02-01T00:00:00 (next month)
+# datetime_add 2000-01-01T00:00:00 1 0 0 0 0 0 => 2001-01-01T00:00:00 (next year)
+# ```
+#  
+# Examples of carry:
+# 
+# ```sh
+# datetime_add 2000-01-01T00:00:00 0 0 0 0 0 1 => 2000-01-01T00:00:01 (next second)
+# datetime_add 2000-01-01T00:00:59 0 0 0 0 0 1 => 2000-01-01T00:01:00 (next minute)
+# datetime_add 2000-01-01T00:59:59 0 0 0 0 0 1 => 2000-01-01T01:00:00 (next hour)
+# datetime_add 2000-01-01T23:59:59 0 0 0 0 0 1 => 2000-01-02T00:00:00 (next day)
+# datetime_add 2000-01-31T23:59:59 0 0 0 0 0 1 => 2000-02-01T00:00:00 (next month)
+# datetime_add 2000-12-31T23:59:59 0 0 0 0 0 1 => 2001-01-01T00:00:00 (next year)
+# ```
+# 
+datetime_add() {
+    datetime="$1"
+    year=$(( ${datetime:0:4} + $2 ))
+    month_0=$(( ${datetime:5:2} + $3 - 1))
+    mday_0=$(( ${datetime:8:2} + $4 - 1))
+    hour=$(( ${datetime:11:2} + $5 ))
+    minute=$(( ${datetime:14:2} + $6 ))
+    second=$(( ${datetime:17:2} + $7 ))
+    mday_max=$(datetime_mday_max "$datetime")
+    mday_max=$(( $mday_max ))
+    if [ $second  -ge 60 ]; then x=$(( $second / 60 )); second=$(( $second - $x * 60 )); minute=$(( $minute + x )); fi
+    if [ $minute  -ge 60 ]; then x=$(( $minute / 60 )); minute=$(( $minute - $x * 60 )); hour=$(( $hour + x )); fi
+    if [ $hour    -ge 24 ]; then x=$(( $hour / 24 )); hour=$(( $hour - $x * 24 )); mday_0=$(( $mday_0 + x )); fi
+    if [ $mday_0  -ge $mday_max ]; then x=$(( $mday_0 / $mday_max )); mday_0=$(( $mday_0 - $x * $mday_max )); month_0=$(( $month_0 + $x )); fi
+    if [ $month_0 -ge 12 ]; then x=$(( $month_0 / 12 )); month_0=$(( $month_0 - $x * 12 )); year=$(( $year + $x )); fi
+    printf "%04d-%02d-%02dT%02d:%02d:%02d" $year $(( $month_0 + 1 )) $(( $mday_0 + 1 )) $hour $minute $second
+}
+
+##
+# Verify parameters
+##
+
+# The macOS default command `date` doesn't support date formatting.
+# Many develops install the GNU `date` instead with the name `gdate`.
+# Therefore we prefer to use `gdate` if it exists on the system.
+command_exists gdate && date_command="gdate" || date_command="date"
+
+if [ $# -lt 2 ]; then
+    die $EXIT_USAGE "nap <duration | datetime | description> [command]"
+fi
+
+datetime=$($date_command +%Y-%m-%dT%H:%M:%S -d "$1"); shift
+
+if [ $# -gt 0 ]; then
+    command="$*"; shift
+fi
+
+##
+#  Main
+##
+
+do_command() {
+    if [ -n "${command}" ]; then
+        datetime_next="$(datetime_add "$datetime" 0 0 0 0 1 0)"
+        echo $datetime_next
+        x="$(datetime_format_for_at_command "$datetime_next")"
+        echo "do_command $x"
+        printf "$command\n" | at -t "$x"
+    fi
+}
+
+do_wake() {
+    x="$(datetime_format_for_pmset_command $datetime)"
+    echo "do_wake $x"
+    sudo pmset schedule wake "$x"
+}
+
+do_sleep() {
+    sudo pmset sleepnow
+}
+
+main() {
+    do_command
+    do_wake
+    #do_sleep
+}
+
+main
+exit $EXIT_SUCCESS
